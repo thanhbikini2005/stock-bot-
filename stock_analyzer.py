@@ -14,14 +14,10 @@ WATCHLIST = os.getenv("WATCHLIST", "VNM,HPG,VIC,VHM,FPT,MWG,TCB,VCB,BID,CTG").sp
 
 # ── Lấy dữ liệu Yahoo Finance ──────────────────────────────────────────────────
 def fetch_ohlcv(symbol, days=200):
-    ticker = symbol.strip().upper()
-    # VNINDEX dùng ticker đặc biệt, các mã VN thêm .VN
-    if ticker == "VNINDEX":
-        yf_ticker = "^VNINDEX"
-    else:
-        yf_ticker = ticker + ".VN"
-    end_ts   = int(datetime.now().timestamp())
-    start_ts = int((datetime.now() - timedelta(days=days)).timestamp())
+    ticker    = symbol.strip().upper()
+    yf_ticker = ticker + ".VN"
+    end_ts    = int(datetime.now().timestamp())
+    start_ts  = int((datetime.now() - timedelta(days=days)).timestamp())
     url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_ticker}"
            f"?interval=1d&period1={start_ts}&period2={end_ts}")
     try:
@@ -38,6 +34,61 @@ def fetch_ohlcv(symbol, days=200):
     except Exception as e:
         print(f"  Loi {symbol}: {e}")
         return pd.DataFrame()
+
+def fetch_vnindex(days=200):
+    """Lấy VNINDEX: thử TCBS trước, fallback sang SSI. Cả 2 miễn phí, không cần key."""
+    to_ts   = int(datetime.now().timestamp())
+    from_ts = int((datetime.now() - timedelta(days=days)).timestamp())
+
+    # ── Nguồn 1: TCBS ──────────────────────────────────────────────────────────
+    try:
+        url  = (f"https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term"
+                f"?ticker=VNINDEX&type=index&resolution=D&from={from_ts}&to={to_ts}")
+        r    = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        data = r.json().get("data", [])
+        if data:
+            df = pd.DataFrame(data)
+            df = df.rename(columns={"tradingDate": "date"})
+            df["date"] = pd.to_datetime(df["date"], unit="s", errors="coerce")
+            for col in ["open", "high", "low", "close", "volume"]:
+                df[col] = pd.to_numeric(df.get(col, 0), errors="coerce")
+            df = df[["date","open","high","low","close","volume"]].dropna().reset_index(drop=True)
+            if len(df) >= 30:
+                print("(TCBS)", end=" ", flush=True)
+                return df
+    except Exception as e:
+        print(f"(TCBS lỗi: {e})", end=" ", flush=True)
+
+    # ── Nguồn 2: SSI iBoard ────────────────────────────────────────────────────
+    try:
+        end_d   = datetime.now().strftime("%Y-%m-%d")
+        start_d = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        url  = (f"https://iboard-query.ssi.com.vn/v2/stock/indices-historical-price"
+                f"?indexId=VNINDEX&fromDate={start_d}&toDate={end_d}&limit=300&offset=0")
+        hdrs = {"User-Agent": "Mozilla/5.0",
+                "Referer":    "https://iboard.ssi.com.vn/",
+                "Origin":     "https://iboard.ssi.com.vn"}
+        r    = requests.get(url, headers=hdrs, timeout=15)
+        rows = r.json().get("data", {}).get("items", [])
+        if rows:
+            df = pd.DataFrame(rows)
+            df = df.rename(columns={
+                "tradingDate": "date", "openIndex": "open",
+                "highIndex":   "high", "lowIndex":  "low",
+                "closeIndex":  "close","totalQtty": "volume"
+            })
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            for col in ["open", "high", "low", "close", "volume"]:
+                df[col] = pd.to_numeric(df.get(col, 0), errors="coerce")
+            df = (df[["date","open","high","low","close","volume"]]
+                  .dropna().sort_values("date").reset_index(drop=True))
+            if len(df) >= 30:
+                print("(SSI)", end=" ", flush=True)
+                return df
+    except Exception as e:
+        print(f"(SSI lỗi: {e})", end=" ", flush=True)
+
+    return pd.DataFrame()
 
 # ── Chỉ báo kỹ thuật ───────────────────────────────────────────────────────────
 def add_indicators(df):
@@ -151,18 +202,18 @@ def volume_analysis(df):
         if v >= 1_000:     return f"{v/1_000:.0f} nghìn"
         return str(int(v))
 
-    # Icon: 🌵 nếu tốt/tăng, 🔻 nếu xấu/giảm
+    # Icon: 📈 nếu tốt/tăng, 🔺 nếu xấu/giảm
     if ratio_today >= 1.5:
-        icon_today = "🌵"; note_today = f"RẤT CAO ({ratio_today:.1f}x TB)"
+        icon_today = "📈"; note_today = f"RẤT CAO ({ratio_today:.1f}x TB)"
     elif ratio_today >= 1.0:
-        icon_today = "🌵"; note_today = f"CAO HƠN TB ({ratio_today:.1f}x)"
+        icon_today = "📈"; note_today = f"CAO HƠN TB ({ratio_today:.1f}x)"
     elif ratio_today >= 0.7:
-        icon_today = "🔻"; note_today = f"THẤP HƠN TB ({ratio_today:.1f}x)"
+        icon_today = "🔺"; note_today = f"THẤP HƠN TB ({ratio_today:.1f}x)"
     else:
-        icon_today = "🔻"; note_today = f"RẤT THẤP ({ratio_today:.1f}x TB)"
+        icon_today = "🔺"; note_today = f"RẤT THẤP ({ratio_today:.1f}x TB)"
 
-    icon_week  = "🌵" if ratio_week  >= 0 else "🔻"
-    icon_month = "🌵" if ratio_month >= 0 else "🔻"
+    icon_week  = "📈" if ratio_week  >= 0 else "🔺"
+    icon_month = "📈" if ratio_month >= 0 else "🔺"
 
     week_txt  = f"{'tăng' if ratio_week  >= 0 else 'giảm'} {abs(ratio_week):.0f}%"
     month_txt = f"{'tăng' if ratio_month >= 0 else 'giảm'} {abs(ratio_month):.0f}%"
@@ -203,7 +254,7 @@ def volume_analysis(df):
 
 # ── Phân tích VNINDEX ──────────────────────────────────────────────────────────
 def analyze_vnindex():
-    df = fetch_ohlcv("VNINDEX")
+    df = fetch_vnindex()
     if df.empty or len(df) < 30:
         return None
     df   = add_indicators(df)
@@ -222,7 +273,7 @@ def analyze_vnindex():
     sig_week  = timeframe_signal(df, 25)
     sig_month = timeframe_signal(df, 60)
 
-    price_icon = "🌵" if change >= 0 else "🔻"
+    price_icon = "📈" if change >= 0 else "🔺"
 
     trend_lines = []
     if trend == "uptrend":
@@ -387,7 +438,7 @@ def format_all(results, now, vnindex_block):
     errors   = [r for r in results if r.get("error")]
 
     for a in sorted_r:
-        price_icon = "🌵" if a["change"] >= 0 else "🔻"
+        price_icon = "📈" if a["change"] >= 0 else "🔺"
         fib = a["fib"]
 
         why_lines = []
